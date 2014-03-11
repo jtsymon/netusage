@@ -1,0 +1,92 @@
+#!/bin/bash
+
+# the day it resets on
+resets=day_of_month
+username=username
+password=password
+
+#####################################################
+# Shouldn't need to touch anything below this point #
+#####################################################
+
+# base64 encoded strings
+url_b64='aHR0cHM6Ly93d3cudGVsZWNvbS5jby5uejo0NDMvamV0c3RyZWFtdW0veHRyYVN1bQ%3D%3D' # https://www.telecom.co.nz:443/jetstreamum/xtraSum
+param_b64='cmVhbG09WHRyYVVzZXJzJg%3D%3D'                                           # realm=XtraUsers&
+
+rm ~/.telecomcookies 2>/dev/null
+curl -sSc ~/.telecomcookies "https://login1.telecom.co.nz/distauth/UI/Login?realm=XtraUsers" >/dev/null &&
+data=$(curl -sSLc ~/.telecomcookies -b ~/.telecomcookies "https://login1.telecom.co.nz/distauth/UI/Login" --data "IDToken0=&IDToken1=$username&IDToken2=$password&IDButton=Log+In&goto=$url_b64&SunQueryParamsString=$param_b64&encoded=true&gx_charset=UTF-8")
+curl -sSLb ~/.telecomcookies "https://www.telecom.co.nz/jetstreamum/xtraSum/amlogout.html" >/dev/null
+
+usage=($(echo "$data" | grep " MB" | awk -F'MB' '{print $1}' | rev | grep -o "^[ 0-9\.,]*" | rev | tr -d ","))
+
+used=${usage[0]}
+total=${usage[1]}
+remaining=$(echo "$total - $used" | bc)
+
+percentUsed=$(echo "scale=2; 100 * $used / $total" | bc)
+
+day=$(date +%_d)
+month=$(date +%_m)
+year=$(date +%Y)
+if [[ "$day" -lt "$resets" ]]; then
+	nextmonth=$month
+	nextyear=$year
+	if [[ "$month" -le "1" ]]; then
+		prevmonth=12
+		prevyear=$(($year - 1))
+	else
+		prevmonth=$(($month - 1))
+		prevyear=$year
+	fi
+else
+	prevmonth=$month
+	prevyear=$year
+	if [[ "$month" -ge "12" ]]; then
+		nextmonth=1
+		nextyear=$(($year + 1))
+	else
+		nextmonth=$(($month + 1))
+		nextyear=$year
+	fi
+fi
+timestamp=$(date -d "$month/$day/$year" +%s)
+prevTimestamp=$(date -d "$prevmonth/$resets/$prevyear" +%s)
+nextTimestamp=$(date -d "$nextmonth/$resets/$nextyear" +%s)
+daysRemaining=$(echo "$(($nextTimestamp - $timestamp)) / 86400" | bc)
+daysSince=$(echo "$(($timestamp - $prevTimestamp)) / 86400" | bc)
+
+if [[ $daysSince -gt 0 ]]; then 
+	usagePerDay=$(echo "$used / $daysSince" | bc)
+else
+	usagePerDay=$(echo "$used / 1" | bc)
+fi
+usageRemainingPerDay=$(echo "$remaining / $daysRemaining" | bc)
+
+[[ $* != *--dzen* ]] && {
+	echo "Used $used MB ($percentUsed%), $remaining MB remaining (of $total MB)"
+	echo "$daysSince days since reset, $daysRemaining days remaining"
+}
+
+if [[ $usagePerDay -lt $usageRemainingPerDay ]]; then
+	if [[ $* == *--dzen* ]]; then
+		echo -n "^fg(\#0000ff)"
+	else
+		echo -en "\E[0;32m"
+	fi
+else
+	if [[ $* == *--dzen* ]]; then
+		echo -n "^fg(\#ff0000)"
+	else
+		echo -en "\E[0;31m"
+	fi
+fi
+echo -en "Used $usagePerDay MB per day, $usageRemainingPerDay MB per day remaining"
+if [[ $* != *--dzen* ]]; then
+	echo -en "\E[0m"
+else
+	echo -n "^fg()"
+fi
+[[ $* != *--noline* ]] && echo
+
+rm ~/.telecomcookies 2>/dev/null
