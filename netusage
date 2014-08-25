@@ -1,92 +1,71 @@
-#!/bin/bash
+#!/bin/perl
 
-# the day it resets on
-resets=day_of_month
-username=username
-password=password
+use strict;
+use warnings;
+use LWP::UserAgent;
+use HTTP::Request::Common;
+use JSON;
+
+# Configure these variables
+my $username    = 'EDIT ME';
+my $password    = 'EDIT ME';
+my $phoneNumber = 'EDIT ME';
 
 #####################################################
 # Shouldn't need to touch anything below this point #
 #####################################################
 
-# base64 encoded strings
-url_b64='aHR0cHM6Ly93d3cudGVsZWNvbS5jby5uejo0NDMvamV0c3RyZWFtdW0veHRyYVN1bQ%3D%3D' # https://www.telecom.co.nz:443/jetstreamum/xtraSum
-param_b64='cmVhbG09WHRyYVVzZXJzJg%3D%3D'                                           # realm=XtraUsers&
+my $curl = LWP::UserAgent->new;
+$curl->cookie_jar( {} );
 
-rm ~/.telecomcookies 2>/dev/null
-curl -sSc ~/.telecomcookies "https://login1.telecom.co.nz/distauth/UI/Login?realm=XtraUsers" >/dev/null &&
-data=$(curl -sSLc ~/.telecomcookies -b ~/.telecomcookies "https://login1.telecom.co.nz/distauth/UI/Login" --data "IDToken0=&IDToken1=$username&IDToken2=$password&IDButton=Log+In&goto=$url_b64&SunQueryParamsString=$param_b64&encoded=true&gx_charset=UTF-8")
-curl -sSLb ~/.telecomcookies "https://www.telecom.co.nz/jetstreamum/xtraSum/amlogout.html" >/dev/null
+# login
+$curl->request(POST 'https://www.spark.co.nz/portal/site/digital-site/template.PAGE/action.process/menuitem.354c3e0302b1aa1994910bf3bc407ea0/?javax.portlet.action=true&javax.portlet.tpst=b85a693813b5760362a127b4bc407ea0',
+    Content => [
+        username => $username,
+        password => $password
+    ]);
 
-usage=($(echo "$data" | grep " MB" | awk -F'MB' '{print $1}' | rev | grep -o "^[ 0-9\.,]*" | rev | tr -d ","))
+# fetch data
+my $response = $curl->request(POST 'https://www.spark.co.nz/portal/site/mytelecom-site/template.BINARYPORTLET/menuitem.c26e41f6aeaa53d794910bf3bc407ea0/resource.process/?javax.portlet.tpst=9252c8781852ea6e85cdc707d5107ea0&javax.portlet.rid_9252c8781852ea6e85cdc707d5107ea0=ajaxGetDataUsage',
+    Content => [
+        phoneNumber => $phoneNumber
+    ]);
 
-used=${usage[0]}
-total=${usage[1]}
-remaining=$(echo "$total - $used" | bc)
+# logout
+$curl->request(GET 'https://www.spark.co.nz/portal/site/mytelecom-site/template.PAGE/action.process/menuitem.c26e41f6aeaa53d794910bf3bc407ea0/?javax.portlet.action=true&javax.portlet.tpst=01921f5d7965760362a127b4bc407ea0');
 
-percentUsed=$(echo "scale=2; 100 * $used / $total" | bc)
+my $json = decode_json($response->decoded_content)->{'actionResult'};
 
-day=$(date +%_d)
-month=$(date +%_m)
-year=$(date +%Y)
-if [[ "$day" -lt "$resets" ]]; then
-	nextmonth=$month
-	nextyear=$year
-	if [[ "$month" -le "1" ]]; then
-		prevmonth=12
-		prevyear=$(($year - 1))
-	else
-		prevmonth=$(($month - 1))
-		prevyear=$year
-	fi
-else
-	prevmonth=$month
-	prevyear=$year
-	if [[ "$month" -ge "12" ]]; then
-		nextmonth=1
-		nextyear=$(($year + 1))
-	else
-		nextmonth=$(($month + 1))
-		nextyear=$year
-	fi
-fi
-timestamp=$(date -d "$month/$day/$year" +%s)
-prevTimestamp=$(date -d "$prevmonth/$resets/$prevyear" +%s)
-nextTimestamp=$(date -d "$nextmonth/$resets/$nextyear" +%s)
-daysRemaining=$(echo "$(($nextTimestamp - $timestamp)) / 86400" | bc)
-daysSince=$(echo "$(($timestamp - $prevTimestamp)) / 86400" | bc)
+# timestamps are in milliseconds and need to be converted to seconds
+my $startTime = $json->{'summaryFrom'} * 0.001;
+my $endTime = $json->{'summaryTo'} * 0.001;
+my $currentTime = time;
+my $elapsedTime = $currentTime - $startTime;
+my $remainingTime = $endTime - $currentTime;
+my $totalTime = $endTime - $startTime;
+my $percentTime = ($remainingTime) / ($elapsedTime);
 
-if [[ $daysSince -gt 0 ]]; then 
-	usagePerDay=$(echo "$used / $daysSince" | bc)
-else
-	usagePerDay=$(echo "$used / 1" | bc)
-fi
-usageRemainingPerDay=$(echo "$remaining / $daysRemaining" | bc)
+# data is in bytes and needs to be converted to mebibytes
+my $used = $json->{'totalUsage'} / 1048576;
+my $allowed = $json->{'monthlyDataAllowance'} / 1048576;
+my $remaining = $allowed - $used;
+my $percentUsed = ($used / $allowed) * 100;
 
-[[ $* != *--dzen* ]] && {
-	echo "Used $used MB ($percentUsed%), $remaining MB remaining (of $total MB)"
-	echo "$daysSince days since reset, $daysRemaining days remaining"
-}
-
-if [[ $usagePerDay -lt $usageRemainingPerDay ]]; then
-	if [[ $* == *--dzen* ]]; then
-		echo -n "^fg(\#0000ff)"
-	else
-		echo -en "\E[0;32m"
-	fi
-else
-	if [[ $* == *--dzen* ]]; then
-		echo -n "^fg(\#ff0000)"
-	else
-		echo -en "\E[0;31m"
-	fi
-fi
-echo -en "Used $usagePerDay MB per day, $usageRemainingPerDay MB per day remaining"
-if [[ $* != *--dzen* ]]; then
-	echo -en "\E[0m"
-else
-	echo -n "^fg()"
-fi
-[[ $* != *--noline* ]] && echo
-
-rm ~/.telecomcookies 2>/dev/null
+printf "Used %0.2f MiB (%0.2f%%), %0.0f/%0.0f MiB remaining\n", (
+    $used,
+    $percentUsed,
+    $remaining,
+    $allowed
+);
+printf "%02d days, %02d:%02d since reset, %02d days, %02d:%02d remaining\n", (
+    int($elapsedTime / 86400),
+    int(($elapsedTime % 86400) / 3600),
+    int(($elapsedTime % 3600) / 60),
+    int($remainingTime / 86400),
+    int(($remainingTime % 86400) / 3600),
+    int(($remainingTime % 3600) / 60)
+);
+printf "Used %0.2f MiB per day, %0.2f MiB per day remaining\n", (
+    $used * 86400 / $elapsedTime,
+    $remaining * 86400 / $remainingTime
+);
